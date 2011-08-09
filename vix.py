@@ -3,7 +3,10 @@
 import sys
 from ctypes import *
 
+import utils
+
 _vix = cdll.LoadLibrary('vix.dll' if sys.platform[:3] == 'win' else 'libvixAllProducts.so')
+_libc = cdll.LoadLibrary(utils.get_libc_name())
 
 # === Global ===
 
@@ -509,7 +512,7 @@ class VixException(Exception):
     def __init__(self, err_code):
         """
         Constructor
-        
+
         @param err_code: a VIX error code or a error message.
         """
         _vix.Vix_GetErrorText.restype = c_char_p
@@ -531,6 +534,12 @@ class VixHost:
         self.is_connected = False
         self.host_handle = VIX_INVALID_HANDLE
 
+    def __del__(self):
+        """
+        Destructor
+        """
+        self.disconnect()
+
     def connect(self, hostname=None, hostport=0, username=None, password=None):
         """
         Connect to a host server.
@@ -544,11 +553,11 @@ class VixHost:
 
         job_hdl = _vix.VixHost_Connect(VIX_API_VERSION,
             VIX_SERVICEPROVIDER_DEFAULT,
-            'https://%s/sdk' % hostname,
+            c_char_p('https://%s/sdk' % hostname),
             hostport,
-            username,
-            password,
-            0,
+            c_char_p(username),
+            c_char_p(password),
+            0, # Should be zero
             VIX_INVALID_HANDLE,
             None,
             None
@@ -595,6 +604,12 @@ class VixVM:
 
         self._vixhost = vixhost
 
+    def __del__(self):
+        """
+        Destructor
+        """
+        self.close()
+
     def _exec_cmd(self, func, *args, **kwargs):
         if not self._vixhost.is_connected:
             raise VixException('Host disconnected')
@@ -629,7 +644,7 @@ class VixVM:
             raise TypeError('%r should be a string.', vmpath)
 
         job_hdl = _vix.VixVM_Open(self._vixhost.host_handle,
-            vmpath,
+            c_char_p(vmpath),
             None,
             None
         )
@@ -740,7 +755,7 @@ class VixVM:
         """
         self._exec_cmd(_vix.VixVM_Suspend,
             self._vm_handle,
-            0,
+            0, # Must be 0
             None,
             None
         )
@@ -758,7 +773,7 @@ class VixVM:
         """
         self._exec_cmd(_vix.VixVM_Pause,
             self._vm_handle,
-            0,
+            0, # Must be 0
             VIX_INVALID_HANDLE,
             None,
             None
@@ -770,7 +785,7 @@ class VixVM:
         """
         self._exec_cmd(_vix.VixVM_Unpause,
             self._vm_handle,
-            0,
+            0, # Must be 0
             VIX_INVALID_HANDLE,
             None,
             None
@@ -793,8 +808,8 @@ class VixVM:
 
         self._exec_cmd(_vix.VixVM_LoginInGuest,
             self._vm_handle,
-            username,
-            password,
+            c_char_p(username),
+            c_char_p(password),
             0,
             None,
             None
@@ -826,8 +841,32 @@ class VixVM:
 
         self._exec_cmd(_vix.VixVM_RunProgramInGuest,
             self._vm_handle,
-            prog,
-            args,
+            c_char_p(prog),
+            c_char_p(args),
+            0,
+            VIX_INVALID_HANDLE,
+            None,
+            None
+        )
+
+    # Guest script running
+    def run_script(self, interpreter, script):
+        """
+        Run a program inside the guest OS.
+
+        @param interpreter: interpreter path.
+        @param script     : script to be run by the iterpreter.
+        """
+        if not isinstance(interpreter, basestring):
+            raise TypeError('%r should be a string.', interpreter)
+
+        if not isinstance(script, basestring):
+            raise TypeError('%r should be a string.', script)
+
+        self._exec_cmd(_vix.VixVM_RunProgramInGuest,
+            self._vm_handle,
+            c_char_p(interpreter),
+            c_char_p(script),
             0,
             VIX_INVALID_HANDLE,
             None,
@@ -845,7 +884,7 @@ class VixVM:
 
         self._exec_cmd(_vix.VixVM_OpenUrlInGuest,
             self._vm_handle,
-            url,
+            c_char_p(url),
             0,
             VIX_INVALID_HANDLE,
             None,
@@ -862,8 +901,8 @@ class VixVM:
         """
         self._exec_cmd(_vix.VixVM_CreateSnapshot,
             self._vm_handle,
-            name,
-            description,
+            c_char_p(name),
+            c_char_p(description),
             VIX_SNAPSHOT_INCLUDE_MEMORY,
             VIX_INVALID_HANDLE,
             None,
@@ -981,10 +1020,10 @@ class VixVM:
 
         self._exec_cmd(_vix.VixVM_CopyFileFromHostToGuest,
             self._vm_handle,
-            src,
-            dest,
-            0,
-            VIX_HANDLETYPE_NONE,
+            c_char_p(src),
+            c_char_p(dest),
+            0, # Must be 0
+            VIX_INVALID_HANDLE,
             None,
             None
         )
@@ -1004,10 +1043,57 @@ class VixVM:
 
         self._exec_cmd(_vix.VixVM_CopyFileFromGuestToHost,
             self._vm_handle,
-            src,
-            dest,
-            0,
-            VIX_HANDLETYPE_NONE,
+            c_char_p(src),
+            c_char_p(dest),
+            0, # Must be 0
+            VIX_INVALID_HANDLE,
             None,
             None
         )
+
+    def capture_screen2file(self, filepath='screen.png'):
+        """
+        Capture screen image
+
+        @param filepath: the path of screen image file that to be saved to
+        """
+
+        job_hdl = _vix.VixVM_CaptureScreenImage(self._vm_handle,
+            VIX_CAPTURESCREENFORMAT_PNG,
+            VIX_INVALID_HANDLE,
+            None,
+            None
+        )
+
+        byte_count = c_int()
+        data = POINTER(c_byte)()
+        err = _vix.VixJob_Wait(job_hdl,
+            VIX_PROPERTY_JOB_RESULT_SCREEN_IMAGE_DATA,
+            byref(byte_count),
+            byref(data),
+            VIX_PROPERTY_NONE
+        )
+        _vix.Vix_ReleaseHandle(job_hdl)
+        if err != VIX_OK:
+            raise VixException(err)
+
+        def errcheck(res, func, args):
+            if func == _libc.fopen and not res:
+                raise IOError('Failed to open file: %d' % get_errno())
+            elif func == _libc.fwrite and res:
+                raise IOError('Failed to close file: %d' % get_errno())
+            return res
+
+        _libc.fopen.restype = c_void_p
+        _libc.fopen.errcheck = errcheck
+        _libc.fwrite.restype = c_int
+        _libc.fclose.restype = c_int
+        _libc.fclose.errcheck = errcheck
+
+        file = _libc.fopen(filepath, 'wb')
+        n = byte_count.value
+        while n > 0:
+            b = _libc.fwrite(data, 1, n, file)
+            n = n - b
+        _libc.fclose(file)
+
